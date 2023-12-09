@@ -8,15 +8,21 @@ https://github.com/JoDehli/PyLoxone
 import logging
 from abc import ABC
 
-from homeassistant.components.climate import (PLATFORM_SCHEMA,
-                                              SUPPORT_PRESET_MODE,
-                                              SUPPORT_TARGET_TEMPERATURE,
-                                              ClimateEntity)
-from homeassistant.components.climate.const import (HVAC_MODE_AUTO,
-                                                    HVAC_MODE_COOL,
-                                                    HVAC_MODE_HEAT,
-                                                    HVAC_MODE_HEAT_COOL,
-                                                    HVAC_MODE_OFF)
+from homeassistant.components.climate import (
+    PLATFORM_SCHEMA,
+    SUPPORT_PRESET_MODE,
+    SUPPORT_TARGET_TEMPERATURE,
+    ClimateEntity,
+)
+from homeassistant.components.climate.const import (
+    HVAC_MODE_AUTO,
+    HVAC_MODE_COOL,
+    HVAC_MODE_HEAT,
+    HVAC_MODE_HEAT_COOL,
+    HVAC_MODE_OFF,
+    SUPPORT_TARGET_TEMPERATURE_RANGE,
+    HVACMode,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
@@ -27,8 +33,7 @@ from voluptuous import All, Optional, Range
 
 from . import LoxoneEntity
 from .const import CONF_HVAC_AUTO_MODE, DOMAIN, SENDDOMAIN
-from .helpers import (get_all, get_cat_name_from_cat_uuid,
-                      get_room_name_from_room_uuid)
+from .helpers import get_all, get_cat_name_from_cat_uuid, get_room_name_from_room_uuid
 from .miniserver import get_miniserver_from_hass
 
 _LOGGER = logging.getLogger(__name__)
@@ -134,10 +139,19 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
             if mode["id"] == mode_id:
                 return mode["name"]
 
+    async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        """Set new target hvac mode."""
+        await self.hass.async_add_executor_job(self.set_hvac_mode, hvac_mode)
+
     @property
     def supported_features(self):
         """Flag supported features."""
-        return SUPPORT_PRESET_MODE | SUPPORT_TARGET_TEMPERATURE
+        if self.get_state_value("operatingMode") is None:
+            return SUPPORT_PRESET_MODE | SUPPORT_TARGET_TEMPERATURE
+        if self.get_state_value("operatingMode") > 2:
+            return SUPPORT_PRESET_MODE | SUPPORT_TARGET_TEMPERATURE
+        else:
+            return SUPPORT_PRESET_MODE | SUPPORT_TARGET_TEMPERATURE_RANGE
 
     @property
     def device_class(self):
@@ -145,7 +159,6 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
         return self.type
 
     async def event_handler(self, event):
-        # _LOGGER.debug(f"Climate Event data: {event.data}")
         update = False
 
         for key in set(self._stateAttribUuids.values()) & event.data.keys():
@@ -196,6 +209,32 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
         """Return the current temperature."""
         return self.get_state_value("tempActual")
 
+    @property
+    def min_temp(self) -> float:
+        """Return the minimum temperature."""
+        return self.get_state_value("frostProtectTemperature")
+
+    @property
+    def max_temp(self) -> float:
+        """Return the maximum temperature."""
+        return self.get_state_value("heatProtectTemperature")
+
+    @property
+    def target_temperature_low(self) -> float | None:
+        """Return the lowbound target temperature we try to reach.
+
+        Requires ClimateEntityFeature.TARGET_TEMPERATURE_RANGE.
+        """
+        return self.get_state_value("comfortTemperature")
+
+    @property
+    def target_temperature_high(self) -> float | None:
+        """Return the highbound target temperature we try to reach.
+
+        Requires ClimateEntityFeature.TARGET_TEMPERATURE_RANGE.
+        """
+        return self.get_state_value("comfortTemperatureCool")
+
     def set_temperature(self, **kwargs):
         """Set new target temperature"""
         if (
@@ -209,12 +248,21 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
                 ),
             )
         else:  # Set comfort temp offset otherwise
-            new_offset = kwargs["temperature"] - self.get_state_value(
-                "comfortTemperature"
+            target_temp_low = kwargs.get("target_temp_low")
+            target_temp_high = kwargs.get("target_temp_high")
+            self.hass.bus.async_fire(
+                SENDDOMAIN,
+                dict(
+                    uuid=self.uuidAction,
+                    value=f"setComfortTemperatureCool/{target_temp_high}",
+                ),
             )
             self.hass.bus.async_fire(
                 SENDDOMAIN,
-                dict(uuid=self.uuidAction, value=f"setComfortModeTemp/{new_offset}"),
+                dict(
+                    uuid=self.uuidAction,
+                    value=f"setComfortTemperature/{target_temp_low}",
+                ),
             )
 
     @property
